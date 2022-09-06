@@ -1,0 +1,27 @@
+FROM golang:1.19-alpine3.16 AS builder
+ARG VERSION
+
+RUN apk add --no-cache git gcc musl-dev make
+
+WORKDIR /go/src/github.com/ryanbeau/psql-migrate
+
+ENV GO111MODULE=on
+
+COPY go.mod go.sum ./
+
+RUN go mod download
+
+COPY . ./
+
+ENV CGO_ENABLED=0
+RUN go build -a -o build/migrate.linux-386 ./cmd/migrate
+
+FROM alpine:3.16
+
+RUN apk add --no-cache ca-certificates
+
+COPY --from=builder /go/src/github.com/ryanbeau/psql-migrate/build/migrate.linux-386 /usr/local/bin/psql-migrate
+RUN ln -s /usr/local/bin/psql-migrate /psql-migrate
+
+ENTRYPOINT ["psql-migrate"]
+CMD ["--help"]
