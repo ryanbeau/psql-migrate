@@ -44,7 +44,7 @@ func Run(ctx context.Context, conn db.Conn, root string) error {
 
 	err = executeMigrationsTx(ctx, conn, files)
 	if err != nil {
-		return fmt.Errorf("ERROR: Executing migration. %w", err)
+		return fmt.Errorf("ERROR: Unable to execute migrations")
 	}
 
 	err = updateDbVersion(ctx, conn, schemaVersion)
@@ -106,15 +106,16 @@ func executeMigrationsTx(ctx context.Context, conn db.Conn, files []string) erro
 		if !tx.Conn().IsClosed() {
 			err = tx.Rollback(context.Background())
 			if err == nil {
-				color.Println(color.Blue, "INFO: Successfully performed rollback on transaction")
+				color.Println(color.Blue, "Successfully performed rollback on migration")
 			} else if !errors.Is(err, pgx.ErrTxClosed) {
 				color.Println(color.Yellow, err.Error())
-				color.Println(color.Red, "ERROR: Unexpected error rolling back transaction")
+				color.Println(color.Red, "ERROR: Unexpected error on transaction rollback")
 			}
 		}
 	}()
 
 	if err := executeMigrations(ctx, tx, files); err != nil {
+		color.Println(color.Cyan, "Attempting rollback on migration transaction...")
 		return err
 	}
 	return tx.Commit(ctx)
@@ -139,9 +140,16 @@ func executeMigrations(ctx context.Context, conn db.Conn, files []string) error 
 		//execute sql
 		_, err = conn.Exec(ctx, string(sql))
 		if err != nil {
+			color.Println(color.Yellow, err.Error())
+
 			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Detail != "" {
-				color.Printlnf(color.Yellow, "DETAILS: %v", pgErr.Detail)
+			if errors.As(err, &pgErr) {
+				if pgErr.Detail != "" {
+					color.Printlnf(color.Blue, "DETAILS: %v", pgErr.Detail)
+				}
+				if pgErr.Hint != "" {
+					color.Printlnf(color.Blue, "HINT: %v", pgErr.Hint)
+				}
 			}
 			return err
 		}
@@ -152,7 +160,15 @@ func executeMigrations(ctx context.Context, conn db.Conn, files []string) error 
 func getFiles(ext, root string, paths []string) ([]string, error) {
 	var files []string
 	for _, path := range paths {
-		err := filepath.WalkDir(filepath.Join(root, path), func(path string, entry os.DirEntry, err error) error {
+		path = filepath.Join(root, path)
+
+		_, err := os.Stat(path)
+		if os.IsNotExist(err) {
+			color.Printlnf(color.Blue, "Directory not found. Skipping: %s", path)
+			continue
+		}
+
+		err = filepath.WalkDir(path, func(path string, entry os.DirEntry, err error) error {
 			if err == nil && !entry.IsDir() && filepath.Ext(path) == ext {
 				files = append(files, path)
 			}
@@ -174,6 +190,10 @@ func getSchemaFiles(root string, dbVersion db.Version, schemaVersion db.Version)
 	path := filepath.Join(root, "migration")
 	migrations, err := os.ReadDir(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			color.Printlnf(color.Blue, "Directory not found. Skipping: %s", path)
+			return files, nil
+		}
 		return files, err
 	}
 
@@ -190,6 +210,7 @@ func getSchemaFiles(root string, dbVersion db.Version, schemaVersion db.Version)
 			// compare the migration subfolder version with db & schema version
 			if dbVersion.GreaterThanOrEq(migrationVersion) || migrationVersion.GreaterThan(schemaVersion) {
 				color.Printlnf(color.Yellow, "Skipping migration directory: %s", migrationPath)
+				continue
 			}
 
 			upPath := filepath.Join(migrationPath, "up")
